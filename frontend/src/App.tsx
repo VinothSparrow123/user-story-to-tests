@@ -1,0 +1,749 @@
+import { useState } from 'react'
+import { generateTests, connectJira, getJiraProjects, getJiraSprints, getJiraStories, getJiraStoryDetails } from './api'
+import { GenerateRequest, GenerateResponse, TestCase, JiraCredentials, JiraProject, JiraSprint, JiraStory } from './types'
+
+function App() {
+  const [formData, setFormData] = useState<GenerateRequest>({
+    storyTitle: '',
+    acceptanceCriteria: '',
+    description: '',
+    additionalInfo: ''
+  })
+  const [results, setResults] = useState<GenerateResponse | null>(null)
+  const [isLoading, setIsLoading] = useState<boolean>(false)
+  const [error, setError] = useState<string | null>(null)
+  const [expandedTestCases, setExpandedTestCases] = useState<Set<string>>(new Set())
+
+  // Jira states
+  const [jiraCredentials, setJiraCredentials] = useState<JiraCredentials>({
+    baseUrl: '',
+    email: '',
+    token: ''
+  })
+  const [isJiraConnected, setIsJiraConnected] = useState<boolean>(false)
+  const [jiraProjects, setJiraProjects] = useState<JiraProject[]>([])
+  const [selectedProjectKey, setSelectedProjectKey] = useState<string>('')
+  const [jiraSprints, setJiraSprints] = useState<JiraSprint[]>([])
+  const [selectedSprintId, setSelectedSprintId] = useState<string>('')
+  const [jiraStories, setJiraStories] = useState<JiraStory[]>([])
+  const [selectedStoryId, setSelectedStoryId] = useState<string>('')
+  const [isConnectingJira, setIsConnectingJira] = useState<boolean>(false)
+  const [isLoadingProjects, setIsLoadingProjects] = useState<boolean>(false)
+  const [isLoadingSprints, setIsLoadingSprints] = useState<boolean>(false)
+  const [isLoadingStories, setIsLoadingStories] = useState<boolean>(false)
+  const [isLoadingStoryDetails, setIsLoadingStoryDetails] = useState<boolean>(false)
+
+  const handleDownloadCSV = () => {
+    if (!results) return
+
+    // Create CSV content
+    const headers = ['ID', 'Title', 'Category', 'Steps', 'Test Data', 'Expected Result']
+    const csvContent = [
+      headers.join(','),
+      ...results.cases.map(testCase => [
+        testCase.id,
+        `"${testCase.title.replace(/"/g, '""')}"`, // Escape quotes in CSV
+        testCase.category,
+        `"${testCase.steps.join('; ').replace(/"/g, '""')}"`, // Join steps with semicolon
+        testCase.testData ? `"${testCase.testData.replace(/"/g, '""')}"` : '',
+        `"${testCase.expectedResult.replace(/"/g, '""')}"`
+      ].join(','))
+    ].join('\n')
+
+    // Create and download the file
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    const url = URL.createObjectURL(blob)
+    link.setAttribute('href', url)
+    link.setAttribute('download', `test-cases-${formData.storyTitle.replace(/[^a-zA-Z0-9]/g, '_')}.csv`)
+    link.style.visibility = 'hidden'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  const toggleTestCaseExpansion = (testCaseId: string) => {
+    const newExpanded = new Set(expandedTestCases)
+    if (newExpanded.has(testCaseId)) {
+      newExpanded.delete(testCaseId)
+    } else {
+      newExpanded.add(testCaseId)
+    }
+    setExpandedTestCases(newExpanded)
+  }
+
+  const handleInputChange = (field: keyof GenerateRequest, value: string) => {
+    setFormData(prev => ({ ...prev, [field]: value }))
+  }
+
+  const handleJiraInputChange = (field: keyof JiraCredentials, value: string) => {
+    setJiraCredentials(prev => ({ ...prev, [field]: value }))
+  }
+
+  const handleProjectChange = async (projectKey: string) => {
+    setSelectedProjectKey(projectKey)
+    setSelectedSprintId('')
+    setSelectedStoryId('')
+    setJiraSprints([])
+    setJiraStories([])
+    if (projectKey) {
+      await loadJiraSprints(projectKey)
+    }
+  }
+
+  const handleSprintChange = async (sprintId: string) => {
+    setSelectedSprintId(sprintId)
+    setSelectedStoryId('')
+    setJiraStories([])
+    if (sprintId) {
+      await loadJiraStories(sprintId)
+    }
+  }
+
+  const handleConnectJira = async () => {
+    if (!jiraCredentials.baseUrl.trim() || !jiraCredentials.email.trim() || !jiraCredentials.token.trim()) {
+      setError('All Jira connection fields are required')
+      return
+    }
+
+    setIsConnectingJira(true)
+    setError(null)
+
+    try {
+      await connectJira(jiraCredentials)
+      setIsJiraConnected(true)
+      await loadJiraProjects()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to connect to Jira')
+    } finally {
+      setIsConnectingJira(false)
+    }
+  }
+
+  const loadJiraProjects = async () => {
+    setIsLoadingProjects(true)
+    try {
+      const projects = await getJiraProjects()
+      setJiraProjects(projects)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load Jira projects')
+    } finally {
+      setIsLoadingProjects(false)
+    }
+  }
+
+  const loadJiraSprints = async (projectKey: string) => {
+    setIsLoadingSprints(true)
+    try {
+      const sprints = await getJiraSprints(projectKey)
+      setJiraSprints(sprints)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load Jira sprints')
+    } finally {
+      setIsLoadingSprints(false)
+    }
+  }
+
+  const loadJiraStories = async (sprintId: string) => {
+    setIsLoadingStories(true)
+    try {
+      const stories = await getJiraStories(sprintId)
+      setJiraStories(stories)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load Jira stories')
+    } finally {
+      setIsLoadingStories(false)
+    }
+  }
+
+  const handleLinkStory = async () => {
+    if (!selectedStoryId) {
+      setError('Please select a story to link')
+      return
+    }
+
+    setIsLoadingStoryDetails(true)
+    setError(null)
+
+    try {
+      const details = await getJiraStoryDetails(selectedStoryId)
+      setFormData({
+        storyTitle: details.title,
+        acceptanceCriteria: details.description,
+        description: '',
+        additionalInfo: ''
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to link story')
+    } finally {
+      setIsLoadingStoryDetails(false)
+    }
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    
+    if (!formData.storyTitle.trim() || !formData.acceptanceCriteria.trim()) {
+      setError('Story Title and Acceptance Criteria are required')
+      return
+    }
+
+    setIsLoading(true)
+    setError(null)
+    
+    try {
+      const response = await generateTests(formData)
+      setResults(response)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate tests')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  return (
+    <div>
+      <style>{`
+        * {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+        }
+        
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+          background-color: #f5f5f5;
+          color: #333;
+          line-height: 1.6;
+        }
+        
+        .container {
+          max-width: 95%;
+          width: 100%;
+          margin: 0 auto;
+          padding: 20px;
+          min-height: 100vh;
+        }
+        
+        @media (min-width: 768px) {
+          .container {
+            max-width: 90%;
+            padding: 30px;
+          }
+        }
+        
+        @media (min-width: 1024px) {
+          .container {
+            max-width: 85%;
+            padding: 40px;
+          }
+        }
+        
+        @media (min-width: 1440px) {
+          .container {
+            max-width: 1800px;
+            padding: 50px;
+          }
+        }
+        
+        .header {
+          text-align: center;
+          margin-bottom: 40px;
+        }
+        
+        .header h1 {
+          font-size: 2.5rem;
+          font-weight: 700;
+          color: #1a1a1a;
+          margin-bottom: 10px;
+        }
+        
+        .header p {
+          font-size: 1.1rem;
+          color: #666;
+          max-width: 600px;
+          margin: 0 auto;
+        }
+        
+        .jira-section {
+          background: white;
+          border-radius: 12px;
+          padding: 30px;
+          margin-bottom: 30px;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .jira-section h2 {
+          font-size: 1.5rem;
+          margin-bottom: 20px;
+          color: #1a1a1a;
+        }
+        
+        .form-group {
+          margin-bottom: 20px;
+        }
+        
+        .form-group label {
+          display: block;
+          margin-bottom: 8px;
+          font-weight: 600;
+          color: #333;
+        }
+        
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+          width: 100%;
+          padding: 12px;
+          border: 2px solid #e1e5e9;
+          border-radius: 8px;
+          font-size: 1rem;
+          transition: border-color 0.3s ease;
+        }
+        
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+          outline: none;
+          border-color: #007acc;
+        }
+        
+        .btn {
+          background: linear-gradient(135deg, #007acc, #005999);
+          color: white;
+          border: none;
+          padding: 12px 24px;
+          border-radius: 8px;
+          font-size: 1rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.3s ease;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+        }
+        
+        .btn:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 4px 12px rgba(0, 122, 204, 0.3);
+        }
+        
+        .btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+          transform: none;
+        }
+        
+        .btn-secondary {
+          background: linear-gradient(135deg, #6c757d, #495057);
+        }
+        
+        .btn-secondary:hover {
+          box-shadow: 0 4px 12px rgba(108, 117, 125, 0.3);
+        }
+        
+        .form-section {
+          background: white;
+          border-radius: 12px;
+          padding: 30px;
+          margin-bottom: 30px;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .form-section h2 {
+          font-size: 1.5rem;
+          margin-bottom: 20px;
+          color: #1a1a1a;
+        }
+        
+        .form-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 20px;
+        }
+        
+        .jira-dropdowns-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          gap: 20px;
+        }
+        
+        @media (max-width: 1024px) {
+          .jira-dropdowns-row {
+            grid-template-columns: 1fr 1fr;
+          }
+        }
+        
+        @media (max-width: 768px) {
+          .form-row {
+            grid-template-columns: 1fr;
+          }
+          .jira-dropdowns-row {
+            grid-template-columns: 1fr;
+          }
+        }
+        
+        .error-message {
+          background: #fee;
+          color: #c33;
+          padding: 12px;
+          border-radius: 8px;
+          margin-bottom: 20px;
+          border: 1px solid #fcc;
+        }
+        
+        .results-section {
+          background: white;
+          border-radius: 12px;
+          padding: 30px;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .results-section h2 {
+          font-size: 1.5rem;
+          margin-bottom: 20px;
+          color: #1a1a1a;
+        }
+        
+        .test-case {
+          border: 1px solid #e1e5e9;
+          border-radius: 8px;
+          padding: 20px;
+          margin-bottom: 20px;
+          background: #fafbfc;
+        }
+        
+        .test-case-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 15px;
+        }
+        
+        .test-case-id {
+          font-weight: 700;
+          color: #007acc;
+          font-size: 1.1rem;
+        }
+        
+        .test-case-category {
+          background: #e1f5fe;
+          color: #01579b;
+          padding: 4px 8px;
+          border-radius: 4px;
+          font-size: 0.9rem;
+          font-weight: 600;
+        }
+        
+        .test-case-title {
+          font-size: 1.2rem;
+          font-weight: 600;
+          margin-bottom: 10px;
+          color: #1a1a1a;
+        }
+        
+        .test-case-details {
+          margin-top: 15px;
+        }
+        
+        .test-case-steps {
+          margin-bottom: 15px;
+        }
+        
+        .test-case-steps h4 {
+          font-weight: 600;
+          margin-bottom: 8px;
+          color: #333;
+        }
+        
+        .step {
+          margin-bottom: 5px;
+          padding-left: 15px;
+          position: relative;
+        }
+        
+        .step:before {
+          content: '•';
+          position: absolute;
+          left: 0;
+          color: #007acc;
+        }
+        
+        .test-case-expected {
+          font-style: italic;
+          color: #555;
+        }
+        
+        .expand-btn {
+          background: none;
+          border: none;
+          color: #007acc;
+          cursor: pointer;
+          font-size: 0.9rem;
+          text-decoration: underline;
+        }
+        
+        .loading {
+          text-align: center;
+          padding: 40px;
+          color: #666;
+        }
+        
+        .spinner {
+          border: 4px solid #f3f3f3;
+          border-top: 4px solid #007acc;
+          border-radius: 50%;
+          width: 40px;
+          height: 40px;
+          animation: spin 1s linear infinite;
+          margin: 0 auto 20px;
+        }
+        
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}</style>
+      
+      <div className="container">
+        <div className="header">
+          <h1>User Story to Test Cases</h1>
+          <p>Convert your user stories into comprehensive test cases using AI</p>
+        </div>
+
+        {/* Jira Connection Section */}
+        <div className="jira-section">
+          <h2>Connect to Jira</h2>
+          {!isJiraConnected ? (
+            <>
+              <div className="form-row">
+                <div className="form-group">
+                  <label htmlFor="jiraBaseUrl">Jira Base URL</label>
+                  <input
+                    type="url"
+                    id="jiraBaseUrl"
+                    value={jiraCredentials.baseUrl}
+                    onChange={(e) => handleJiraInputChange('baseUrl', e.target.value)}
+                    placeholder="https://vinoth-testleaf-genai.atlassian.net"
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="jiraEmail">Email</label>
+                  <input
+                    type="email"
+                    id="jiraEmail"
+                    value={jiraCredentials.email}
+                    onChange={(e) => handleJiraInputChange('email', e.target.value)}
+                    placeholder="your.email@company.com"
+                  />
+                </div>
+              </div>
+              <div className="form-group">
+                <label htmlFor="jiraToken">API Token</label>
+                <input
+                  type="password"
+                  id="jiraToken"
+                  value={jiraCredentials.token}
+                  onChange={(e) => handleJiraInputChange('token', e.target.value)}
+                  placeholder="Your Jira API token"
+                />
+              </div>
+              <button 
+                className="btn" 
+                onClick={handleConnectJira} 
+                disabled={isConnectingJira}
+              >
+                {isConnectingJira ? 'Connecting...' : 'Connect to Jira'}
+              </button>
+            </>
+          ) : (
+            <>
+              <p style={{ color: 'green', marginBottom: '20px' }}>✓ Connected to Jira</p>
+              <div className="jira-dropdowns-row">
+                <div className="form-group">
+                  <label htmlFor="projectSelect">Select Project</label>
+                  <select
+                    id="projectSelect"
+                    value={selectedProjectKey}
+                    onChange={(e) => handleProjectChange(e.target.value)}
+                    disabled={isLoadingProjects}
+                  >
+                    <option value="">-- Select a project --</option>
+                    {jiraProjects.map(project => (
+                      <option key={project.key} value={project.key}>
+                        {project.name} ({project.key})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label htmlFor="sprintSelect">Select Sprint</label>
+                  <select
+                    id="sprintSelect"
+                    value={selectedSprintId}
+                    onChange={(e) => handleSprintChange(e.target.value)}
+                    disabled={isLoadingSprints || !selectedProjectKey}
+                  >
+                    <option value="">
+                      {selectedProjectKey ? '-- Select a sprint --' : '-- Select project first --'}
+                    </option>
+                    {jiraSprints.map(sprint => (
+                      <option key={sprint.id} value={sprint.id}>
+                        {sprint.name} ({sprint.state})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label htmlFor="storySelect">Select User Story</label>
+                  <select
+                    id="storySelect"
+                    value={selectedStoryId}
+                    onChange={(e) => setSelectedStoryId(e.target.value)}
+                    disabled={isLoadingStories || !selectedSprintId}
+                  >
+                    <option value="">
+                      {selectedSprintId ? '-- Select a story --' : '-- Select sprint first --'}
+                    </option>
+                    {jiraStories.map(story => (
+                      <option key={story.id} value={story.id}>
+                        {story.id}: {story.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <button 
+                className="btn btn-secondary" 
+                onClick={handleLinkStory} 
+                disabled={!selectedStoryId || isLoadingStoryDetails}
+              >
+                {isLoadingStoryDetails ? 'Linking...' : 'Link Story'}
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Test Generation Form */}
+        <div className="form-section">
+          <h2>Generate Test Cases</h2>
+          {error && <div className="error-message">{error}</div>}
+          
+          <form onSubmit={handleSubmit}>
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="storyTitle">Story Title *</label>
+                <input
+                  type="text"
+                  id="storyTitle"
+                  value={formData.storyTitle}
+                  onChange={(e) => handleInputChange('storyTitle', e.target.value)}
+                  required
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="acceptanceCriteria">Acceptance Criteria *</label>
+                <textarea
+                  id="acceptanceCriteria"
+                  value={formData.acceptanceCriteria}
+                  onChange={(e) => handleInputChange('acceptanceCriteria', e.target.value)}
+                  rows={4}
+                  required
+                />
+              </div>
+            </div>
+            
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="description">Description</label>
+                <textarea
+                  id="description"
+                  value={formData.description}
+                  onChange={(e) => handleInputChange('description', e.target.value)}
+                  rows={4}
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="additionalInfo">Additional Information</label>
+                <textarea
+                  id="additionalInfo"
+                  value={formData.additionalInfo}
+                  onChange={(e) => handleInputChange('additionalInfo', e.target.value)}
+                  rows={4}
+                />
+              </div>
+            </div>
+            
+            <button type="submit" className="btn" disabled={isLoading}>
+              {isLoading ? 'Generating...' : 'Generate Test Cases'}
+            </button>
+          </form>
+        </div>
+
+        {/* Results Section */}
+        {results && (
+          <div className="results-section">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h2>Generated Test Cases</h2>
+              <button 
+                className="btn btn-secondary" 
+                onClick={handleDownloadCSV}
+                style={{ margin: 0 }}
+              >
+                📥 Download CSV
+              </button>
+            </div>
+            {results.cases.map((testCase) => (
+              <div key={testCase.id} className="test-case">
+                <div className="test-case-header">
+                  <span className="test-case-id">{testCase.id}</span>
+                  <span className="test-case-category">{testCase.category}</span>
+                </div>
+                <div className="test-case-title">{testCase.title}</div>
+                {expandedTestCases.has(testCase.id) ? (
+                  <div className="test-case-details">
+                    <div className="test-case-steps">
+                      <h4>Steps:</h4>
+                      {testCase.steps.map((step, index) => (
+                        <div key={index} className="step">{step}</div>
+                      ))}
+                    </div>
+                    {testCase.testData && (
+                      <div className="test-case-data">
+                        <h4>Test Data:</h4>
+                        <p>{testCase.testData}</p>
+                      </div>
+                    )}
+                    <div className="test-case-expected">
+                      <h4>Expected Result:</h4>
+                      <p>{testCase.expectedResult}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="expand-btn" onClick={() => toggleTestCaseExpansion(testCase.id)}>
+                    Show Details
+                  </button>
+                )}
+              </div>
+            ))}
+            {results.model && (
+              <div style={{ marginTop: '20px', fontSize: '0.9rem', color: '#666' }}>
+                <p>Model: {results.model}</p>
+                <p>Tokens: {results.promptTokens} prompt + {results.completionTokens} completion</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {isLoading && (
+          <div className="loading">
+            <div className="spinner"></div>
+            <p>Generating test cases...</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default App

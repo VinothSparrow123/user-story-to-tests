@@ -1,0 +1,8 @@
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+Deploying Userstories to testcases app
+1) Open your vscode and import the project (zip -> extract)
+2) npm install (open terminal -> npm install)
+3) Confirm node_modules are available at the root folder
+4) go to .env and paste your groq api
+5) go and run >> npm run dev
